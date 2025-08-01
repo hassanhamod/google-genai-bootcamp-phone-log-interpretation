@@ -19,9 +19,9 @@ BT_INSTANCE_ID="phonelogs"
 BT_TABLE_ID="phone_user_activity"
 
 ##### TOOL FOR MAIN AGENT
-def get_phone_logs(patient_id: str, start_time: int, end_time: int, recordType: str, tool_context: ToolContext):
+def get_records_bigtable(patient_id: str, start_time: int, end_time: int, recordType: str, tool_context: ToolContext):
     """
-    Retrieves phone user activity data for a given patient id within a time range. In BT, UserActivityRecord is also known as phone user activity or phone logs. Do NOT do anything if 'phone_logs' has been populated and the user has not provided a new patient_id.
+    Retrieves patient data for a given patient id within a time range. In BT, UserActivityRecord is also known as phone user activity or phone logs. Do NOT do anything if 'phone_logs' has been populated and the user has not provided a new patient_id.
     
     Args:
         patient_id (str): a UUID for a given patient
@@ -41,7 +41,7 @@ def get_phone_logs(patient_id: str, start_time: int, end_time: int, recordType: 
     start_key = f"{patient_id}#{recordType}#{start_time}"
     end_key = f"{patient_id}#{recordType}#{end_time}"
     
-    #print(start_key)
+    print(f"row key for lookup: {start_key}")
     
     column_family_id = "raw"
     column_id = "Raw".encode("utf-8")
@@ -73,7 +73,7 @@ def make_observation(tool_context: ToolContext):
     phone_logs = tool_context.state.get("phone_logs")
 
     if not phone_logs:
-        return "Error: No phone logs have been loaded into the cache. Use the 'get_phone_logs' tool first."
+        return "Error: No phone logs have been loaded into the cache. Use the 'get_records_bigtable' tool first."
 
     # print(f"DEBUG: Retrieving {len(phone_logs)} logs from state for agent analysis.")
     # Return the logs. The agent will use this output for its reasoning.
@@ -85,8 +85,7 @@ def make_observation(tool_context: ToolContext):
 observation_agent = Agent(
     model=MODEL,
     name="observation_agent",
-    instruction="You are the general observations agent. You make observations about the 'phone_logs' found in state. Do NOT do anything if 'phone_logs' has not been populated.",
-    description="""Handles general observations about the phone logs using the 'make_observation' tool. Contents of a user activity record are json-formatted, and contain the following keys:
+    instruction="""Handles general observations about the phone logs using the 'make_observation' tool. Contents of a user activity record are json-formatted, and contain the following keys:
     
       "Stream": Enum identifier for the device and operating system,
       "RecordedSystemTime": UTC representation of the recorded display time,
@@ -97,8 +96,9 @@ observation_agent = Agent(
       "TransmitterNumber": unique identifier for transmitter device,
       "RecordType": UserActivityRecord is the only supported RecordType of the available data
       
-      When a user asks for specifics about Transmitters, filter by UseractivityType "Transmitter" or "Display Screen". When the user asks about battery issues, use the UseractivityType "Battery". When the user asks about anything related to the phone OS, use the "OS" useractivitytype. If the user asks to identify any network related logs, use the "Networking" useractivitytype. Start with a general summary of what you see when the data has been returned from the read_agent based off the Data field. Also provide a breakdown with counts of UserActivitySubTypes grouped by UserActivityTypes.
-      
+      When a user asks for anything related to transmitter, include records from UserActivityType = "Displaying Screen" and SubType startswith "Pairing Transmitter". When the user asks about battery issues, use the UseractivityType "Battery". When the user asks about anything related to the phone OS, use the "OS" useractivitytype. If the user asks to identify any network related logs, use the "Networking" useractivitytype. \ ONLY if the user asks to see the logs, deduplicate the data field by useractivitytype and useractivitysubtype when the recordeddisplaytime is within 1 minute of each other, and provide a datetime range for the deduped records with a count of the number of records deduped. Provide raw data output when asked. If you are asked about data that you do not recognize, go back to read_agent to fetch new data.
+    """,
+    description="""You are the general observations agent. You make observations about the 'phone_logs' found in state. Do NOT do anything if 'phone_logs' has not been populated. Start with a general summary of what you see when the data has been returned from the read_agent based off the Data field. Also provide a breakdown with counts of UserActivitySubTypes grouped by UserActivityTypes.
     """,
     tools=[make_observation]
 )
@@ -133,13 +133,16 @@ read_agent = Agent(
     model=MODEL,
     name="read_agent",
     description=(
-       "Agent that answers questions about BigTable data by executing row reads."
+       "Agent that answers questions about BigTable data by executing row range reads."
     ),
-    instruction="""You are an agent with access to bigtable. You will be asked to perform a lookup on the data present in there. The user will provide a human-readable date or datetime, you are expected to convert that time into unix seconds. At minimum, the date should contain a day,  month, and year. If no timestamp is provided, assume midnight to 11:59pm. If the user asks for phone logs or user logs, use UserActivityRecord for the recordType.
-
+    instruction="""You are an agent with access to bigtable. You will be asked to perform a lookup on the data present in there. The user will provide a human-readable date or datetime, you are expected to convert that time into unix seconds. The date must contain a day,  month, and year. If no timestamp is provided, assume midnight to 11:59pm. If the user asks:
+    for phone logs or user logs, or if the user asks about transmitter issues - use UserActivityRecord for the recordType. 
+    anything about errors - use ErrorLogRecord for the recordtype.
+    egv, glucose - use GlucoseRecord for the recordtype.
+    meter - use MeterRecord for the recordtype.
     """,
     tools=[
-       get_phone_logs
+       get_records_bigtable
     ]
 )
 
@@ -150,7 +153,7 @@ root_agent = Agent(
     description=(
         "Agent that routes requests"
     ),
-    instruction="""You are an agent that has access to a read_agent and an observation_agent. Based off the request, when the user asks for data using a patient, record type, and date range, you should use the read_agent. If the user asks for further analysis of the data, use the observation_agent.""",
+    instruction="""You are an agent that has access to a read_agent and an observation_agent. Based off the request, when the user asks for data using a patient, record type, and date range, you should use the read_agent. If the user asks for further analysis of the data, only use the observation_agent. If the user provides a new date range, a new patient id, or a new RecordType do a new lookup for data with the read_agent.""",
     sub_agents=[
         read_agent,
         observation_agent
